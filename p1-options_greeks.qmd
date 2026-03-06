@@ -1,0 +1,462 @@
+---
+title: "WTI Options Portfolio: Full Greek P&L Attribution"
+subtitle: "Individual Project"
+date: "`r Sys.Date()`"
+author: "Moe Moughnieh"
+format:
+  html:
+    theme: cosmo
+    embed-resources: true
+    page-layout: full
+    toc: true
+    toc-location: left
+    grid:
+      margin-width: 200px
+      body-width: 1000px
+    resource:
+      - "*.js"
+      - "*.mp3"
+editor: source
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+library(tidyverse)
+library(gt)
+library(RTL)
+library(gridExtra)
+library(patchwork)
+
+F_0  <- 73.00
+r    <- 0.04
+mult <- 1000
+
+port <- dplyr::tribble(
+  ~pos, ~type,   ~K,     ~T2M,   ~sigma,  ~n,
+  "P1", "put",   70.00,  3/12,   0.3500,  +2000L,
+  "P2", "put",   55.00,  3/12,   0.4200,  -2000L,
+  "P3", "call",  80.00,  3/12,   0.3000,  -2000L
+)
+```
+
+# Description
+
+You are a risk analyst at an energy trading desk. The desk holds a portfolio of WTI crude oil options — specifically, options on NYMEX CL futures contracts.
+
+Your role is to:
+
+-   Build a full-Greek P&L attribution framework: the standard tool used on trading desks to explain daily P&L movements across **Delta** (directional exposure), **Gamma** (curvature), **Vega** (volatility sensitivity), **Vanna** (sensitivity of delta to volatility), and **Theta** (time decay).
+-   You are expected to understand contracts and use the right option model and specifications in the `RTL` package.
+-   Tell me in your own words the portfolio's risk profile, how the Greeks interact, and what this means for a desk managing this book in practice.
+-   No AI use in any shape or form and assignment submitted should be a github repo that I can clone and assess.
+
+# Objective
+
+1.  Compute numerical Greeks for each position and for the overall portfolio across the full WTI price range (\$50–\$100/bbl).
+2.  Interpret the portfolio's mark-to-market profile and explain how changing Gamma across strike levels affects delta-hedging in practice.
+3.  Build a complete P&L attribution framework — Delta, Gamma, Vega, Vanna, and Theta — and verify it accurately explains overnight P&L under a realistic market move.
+4.  Critically evaluate where and why the linear/quadratic approximation breaks down as spot moves away from current market.
+
+# Exposure
+
+```{r exposure_table, echo=FALSE}
+dplyr::tribble(
+  ~Position, ~Type,  ~`Strike K ($/bbl)`, ~Maturity, ~`Impl. Vol`, ~Contracts,
+  "P1", "Put",  70.00, "3M", "35.00%", "+2,000 long",
+  "P2", "Put",  55.00, "3M", "42.00%", "-2,000 short",
+  "P3", "Call", 80.00, "3M", "30.00%", "-2,000 short"
+) |>
+  gt::gt() |>
+  gt::tab_header(
+    title    = "WTI Options Portfolio",
+    subtitle = "Three-way collar: long put spread + short OTM call  |  F\u2080 = $73/bbl"
+  ) |>
+  gt::fmt_number(columns = `Strike K ($/bbl)`, decimals = 2)
+```
+
+**Market parameters**: current WTI futures price F₀ = **\$73.00/bbl**, risk-free rate r = **4.00%** (annualised, continuously compounded).
+
+Select the appropriate pricing model from the `RTL` package for options on WTI crude oil futures. Consider the nature of the underlying contract — a NYMEX CL futures — when choosing the model and setting its cost-of-carry parameter.
+
+# Question 1 (9 points)
+
+For **each position**, compute the following Greeks **numerically** using central differences evaluated at `F_0`:
+
+-   **Delta** (∂V/∂F)
+-   **Gamma** (∂²V/∂F²)
+-   **Vega** (∂V/∂σ)
+-   **Theta** (∂V/∂T)
+
+**Step size selection**: For each Greek, choose an appropriate finite-difference step size and explain your reasoning. A good step is small enough that the finite difference accurately approximates the true derivative, but not so small that floating-point subtraction errors dominate. Consider the natural scale of each risk factor (price in \$/bbl, vol as a decimal, time in years) and any special considerations for the short-dated options in this portfolio.
+
+**Dollar scaling**: Each raw numerical derivative gives the option price change **per barrel** for a unit move in the risk factor. To express the Greek as a total dollar P&L impact for a position, multiply by `n × mult`, where `n` is the signed contract count (positive = long, negative = short) and `mult = 1,000 bbl/contract`. For example, a delta of 0.50/bbl for a 3,000-contract long position means the desk gains or loses 0.50 × 3,000 × 1,000 = \$1,500,000 per \$1/bbl move in WTI.
+
+Create plots showing each Greek vs. futures price over F ∈ \[50, 100\], with one line per position.
+
+**d.** Compute the **portfolio mark-to-market (MTM)** value and **portfolio Gamma** across F ∈ \[50, 100\]. Plot them on two separate panels. In 3–5 sentences, explain:
+
+-   What the MTM profile shape reveals about the portfolio's net directionality and curvature.
+-   Where portfolio Gamma is highest and lowest across the price range, and why those regions correspond to specific positions.
+-   What the changing Gamma means for a delta-hedger rebalancing daily as WTI moves through the \$50–\$100 range.
+
+```{r q1}
+
+stepSizeS <- 1
+stepSizeVol <- 0.01
+stepSizeTheta <- 1 / 365
+
+# Customize RTL Option Pricing to given parameters
+
+priceOption <- function(S, X, T2M, r = 0.04, b = 0, sigma, type) {
+  RTL::GBSOption(
+    S = S,
+    X = X,
+    T2M = T2M,
+    r = r, 
+    b = 0,
+    sigma = sigma,
+    type = type
+  )$price
+}
+
+## Construct comprehensive tibble
+
+portTableFull <- tibble(
+  underlyingFut = rep(seq(50, 100, by = 1), nrow(port))
+) %>%
+  dplyr::group_by(underlyingFut) %>%
+  dplyr::mutate(pos = port$pos,
+                type = port$type,
+                K = port$K,
+                T2M = port$T2M,
+                sigma = port$sigma,
+                n = port$n) %>%
+  dplyr::arrange(underlyingFut) %>%
+  dplyr::ungroup() %>% 
+  dplyr::mutate(price = mapply(priceOption, S = underlyingFut, X = K, T2M = T2M, sigma = sigma, type = type),
+                priceUpF_0 = mapply(priceOption, S = (underlyingFut + stepSizeS), X = K, T2M = T2M, sigma = sigma, type = type),
+                priceDownF_0 = mapply(priceOption, S = (underlyingFut - stepSizeS), X = K, T2M = T2M, sigma = sigma, type = type)) %>%
+  dplyr::mutate(delta = n * mult * ((priceUpF_0 - priceDownF_0) / (2 * stepSizeS)),
+                gamma = n * mult * ((priceUpF_0 - (2*price) + priceDownF_0) / (stepSizeS^2))) %>%
+  dplyr::select(-c(priceUpF_0, priceDownF_0)) %>%
+  dplyr::mutate(priceUpVol = mapply(priceOption, S = underlyingFut, X = K, T2M = T2M, sigma = (sigma + stepSizeVol), type = type),
+                priceDownVol = mapply(priceOption, S = underlyingFut, X = K, T2M = T2M, sigma = (sigma - stepSizeVol), type = type)) %>%
+  dplyr::mutate(vega = n * mult * ((priceUpVol - priceDownVol) / (2*stepSizeVol))) %>% dplyr::select(-c(priceUpVol, priceDownVol)) %>%
+  dplyr::mutate(priceTimeDown = mapply(priceOption, S = underlyingFut, X = K, T2M = (T2M - stepSizeTheta), sigma = sigma, type = type)) %>%
+  dplyr::mutate(theta = n * mult * ((priceTimeDown - price) / (stepSizeTheta))) %>% dplyr::select(-c(priceTimeDown))
+  
+##
+
+# Plots of each greek across interval F [50, 100]
+
+# Ideas: Scale y axis, alter x & y names, add title to the joined plots (can I do that?)
+
+greekTable <- portTableFull %>%
+  dplyr::select(c(underlyingFut, pos, delta, gamma, vega, theta))
+
+deltaPlot <- greekTable %>%
+  ggplot(aes(x = underlyingFut, y = delta, col = pos)) + geom_line(linewidth = 1.5)
+
+gammaPlot <- greekTable %>%
+  ggplot(aes(x = underlyingFut, y = gamma, col = pos)) + geom_line(linewidth = 1.5)
+
+vegaPlot <- greekTable %>%
+  ggplot(aes(x = underlyingFut, y = vega, col = pos)) + geom_line(linewidth = 1.5)
+
+thetaPlot <- greekTable %>%
+  ggplot(aes(x = underlyingFut, y = theta, col = pos)) + geom_line(linewidth = 1.5)
+
+(deltaPlot | gammaPlot) / (vegaPlot | thetaPlot) + plot_annotation(title = "Greeks vs. Futures Price from [50,100]")
+
+##
+
+# d) Portfolio MTM + Portfolio Gamma
+
+# Value of portfolio at F_0 = 73
+portValueToday <- portTableFull %>%
+  dplyr::filter(underlyingFut == F_0) %>%
+  dplyr::mutate(positionVal = n * mult * price) %>%
+  dplyr::pull(positionVal) %>%
+  sum(.)
+
+# MTM Calculations
+
+portMTM <- portTableFull %>%
+  dplyr::select(underlyingFut, pos, n, price, gamma) %>% 
+  dplyr::mutate(positionVal = n * mult * price) %>%
+  dplyr::group_by(underlyingFut) %>%
+  dplyr::summarise(
+    portfolioVal = sum(positionVal),
+    portfolioGamma = sum(gamma)
+  ) %>%
+  dplyr::ungroup()
+
+# Plot MTM and Gamma across F [50,100]
+
+portMTMPlot <- portMTM %>%
+  ggplot(aes(x = underlyingFut, y = portfolioVal)) + geom_line(linewidth = 1.5, color = "darkblue")
+
+portGammaPlot <- portMTM %>%
+  ggplot(aes(x = underlyingFut, y = portfolioGamma)) + geom_line(linewidth = 1.5, color = "darkgreen")
+
+(portMTMPlot | portGammaPlot)
+
+```
+
+# Question 2 (3 points)
+
+Sum Greeks across positions to show **portfolio-level Greeks** at the current market. Present in a `gt::gt()` table. At approximately what futures price does the portfolio delta change sign?
+
+```{r q2}
+
+# Portfolio greeks @ F_0 = 73
+
+portGreeksToday <- portTableFull %>%
+  dplyr::filter(underlyingFut == F_0) %>%
+  dplyr::group_by(underlyingFut) %>%
+  dplyr::summarise(
+    "Delta" = sum(delta),
+    "Gamma" = sum(gamma),
+    "Vega" = sum(vega),
+    "Theta" = sum(theta)
+  ) %>%
+  dplyr::select(-underlyingFut)
+
+portGreeksToday %>% gt() %>%
+  tab_header(title = "Portfolio Greeks Today @ $73.00/bbl WTI Future") %>%
+  tab_style(style = cell_borders(sides = "all", color = "black"), locations = cells_body())
+
+
+```
+
+# Question 3 (8 points)
+
+Overnight, US-Iran tensions escalate sharply. The US strikes Iranian nuclear facilities; Iran retaliates by mining the Strait of Hormuz. WTI gaps up at the open:
+
+-   WTI futures: F moves from **73.00** to **90.00** (+\$17.00/bbl)
+-   Implied volatility: each position's sigma spikes by **+0.20** (20 vol points)
+-   Time: **1 calendar day** passes
+
+For each position and for the portfolio total, compute:
+
+1.  **Actual P&L**: full revaluation at new F, new sigma, new T. P&L = (new price − old price) × n × mult.
+2.  **Attributed P&L**: ΔV ≈ (Delta × ΔF) + (½ × Gamma × ΔF²) + (Vega × Δσ) + (Vanna × ΔF × Δσ) + (Theta × Δt), scaled to dollars.
+3.  **Unexplained residual**: Actual − Attributed.
+4.  **Attribution breakdown**: what share (%) of Attributed P&L comes from each Greek?
+
+**Vanna** (∂²V/∂F∂σ) measures how delta changes as volatility moves. With both a large spot jump and a large vol spike coinciding, Vanna is non-negligible. Use a central-difference cross-partial:
+
+$$\text{Vanna} = \frac{V(F+h, \sigma+k) - V(F+h, \sigma-k) - V(F-h, \sigma+k) + V(F-h, \sigma-k)}{4 \cdot h \cdot k}$$
+
+with h = `step_S` and k = `step_v`. The Vanna P&L contribution is Vanna × ΔF × Δσ.
+
+Present all results in a `gt::gt()` table. Which position dominates the loss? Is the Greek attribution a reliable approximation here, and why or why not?
+
+```{r q3}
+
+# Compute actual, attributed, unexplained
+
+wtiChange <- 90 - 73
+volChange <- .20
+timeChange <- stepSizeTheta
+
+changesVec <- c(wtiChange, 0.5 * (wtiChange^2), volChange, timeChange, wtiChange * volChange)
+
+greekNames <- c("Delta", "Gamma", "Vega", "Theta", "Vanna")
+
+# Actual PnL
+
+actualPnL <- port %>%
+  dplyr::mutate(priceNew = mapply(priceOption, S = 90, X = K, T2M = (T2M - timeChange), sigma = (sigma + volChange), type = type),
+                priceOld = mapply(priceOption, S = F_0, X = K, T2M = T2M, sigma = sigma, type = type)) %>%
+  dplyr::mutate(positionValueNew = n * mult * priceNew,
+                positionValueOld = n * mult * priceOld) %>%
+  dplyr::mutate(actualPnL = positionValueNew - positionValueOld) %>%
+  dplyr::select(pos, actualPnL) %>%
+  tidyr::pivot_wider(names_from = "pos", values_from = "actualPnL") %>%
+  dplyr::mutate(" " = "Actual PnL") %>%
+  dplyr::select(c(" ", everything())) %>%
+  dplyr::mutate("Portfolio" = sum(across(where(~ is.numeric(.)))))
+
+actAttribTable <- actualPnL
+
+# Comprehensive Table for Greek PnLs
+
+greeks <- portTableFull %>%
+  dplyr::filter(underlyingFut == F_0) %>%
+  dplyr::mutate(priceUpUp = mapply(priceOption, S = (underlyingFut + stepSizeS), X = K, T2M = T2M, sigma = (sigma + stepSizeVol), type = type),
+                priceUpDown = mapply(priceOption, S = (underlyingFut + stepSizeS), X = K, T2M = T2M, sigma = (sigma - stepSizeVol), type = type),
+                priceDownUp = mapply(priceOption, S = (underlyingFut - stepSizeS), X = K, T2M = T2M, sigma = (sigma + stepSizeVol), type = type),
+                priceDownDown = mapply(priceOption, S = (underlyingFut - stepSizeS), X = K, T2M = T2M, sigma = (sigma - stepSizeVol), type = type)) %>%
+  dplyr::mutate(vanna = n * mult * ((priceUpUp - priceUpDown - priceDownUp + priceDownDown) / (4 * stepSizeS * stepSizeVol))) %>%
+  dplyr::select(pos, delta, gamma, vega, theta, vanna) %>%
+  dplyr::mutate(!!!setNames(map2(.[, -1], changesVec, ~ .x * .y), paste0(greekNames, " PnL"))) %>%
+  dplyr::select(pos, contains("PnL"))
+
+# Attributed PnL
+
+attribPnL <- greeks %>%
+  dplyr::group_by(pos) %>%
+  dplyr::mutate(positionVal = sum(across(where(~ is.numeric(.))))) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(pos, positionVal) %>%
+  tidyr::pivot_wider(names_from = "pos", values_from = "positionVal") %>%
+  dplyr::mutate(" " = "Attributed PnL") %>%
+  dplyr::select(" ", everything()) %>%
+  dplyr::mutate("Portfolio" = sum(across(where( ~is.numeric(.)))))
+
+actAttribTable <- bind_rows(actAttribTable, attribPnL)
+
+# Unexplained PnL
+
+unexplainedPnL <- actAttribTable %>%
+  tidyr::pivot_longer(cols = -" ",
+                      names_to = "Instrument",
+                      values_to = "PnL") %>%
+  tidyr::pivot_wider(names_from = " ",
+                     values_from = "PnL") %>%
+  dplyr::mutate("Unexplained PnL" = `Actual PnL` - `Attributed PnL`) %>%
+  dplyr::select(Instrument, "Unexplained PnL") %>%
+  tidyr::pivot_wider(names_from = Instrument, values_from = "Unexplained PnL") %>%
+  dplyr::mutate(" " = "Unexplained PnL") %>%
+  dplyr::select(" ", everything())
+
+actAttribTable <- bind_rows(actAttribTable, unexplainedPnL)
+
+# Greek Attribution Breakdown
+
+attribPnLs <- attribPnL %>%
+  dplyr::select(-" ") %>%
+  tidyr::pivot_longer(cols = everything(), names_to = "instrument", values_to = "attribPnL") %>%
+  dplyr::pull(attribPnL)
+
+attribBreakdown <- greeks %>%
+  tidyr::pivot_longer(-pos,
+                      names_to = "measure",
+                      values_to = "PnL") %>%
+  tidyr::pivot_wider(names_from = pos, values_from = PnL) %>%
+  dplyr::group_by(measure) %>%
+  dplyr::mutate("Portfolio" = sum(across(where(~ is.numeric(.))))) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(!!!setNames(map2(.[, -1], attribPnLs, ~ (.x / .y)), paste0(colnames(.[, -1])))) %>%
+  dplyr::mutate(measure = str_replace_all(measure, " PnL", " % of Attribution")
+  ) %>%
+  dplyr::rename(" " = measure)
+  
+actAttribTable <- bind_rows(actAttribTable, attribBreakdown)
+
+actAttribTable %>% gt() %>%
+  fmt_number(decimals = 2) %>%
+  fmt_percent(rows =  c(4:8)) %>%
+  tab_header(title = "Actual vs. Attributed PnL") %>%
+  tab_style(
+    style = cell_borders(sides = "all", color = "black"),
+    locations = cells_body()
+  )
+
+
+```
+
+# Question 4 (4 points)
+
+The Iran war scenario (ΔF = +\$17) is an extreme move. How well does the Greek approximation hold as WTI moves further from the current market?
+
+Holding vol and time constant at their initial values, compute Actual P&L (full revaluation) and Attributed P&L (Delta + Gamma only) for the portfolio across ΔF ∈ \[–20, +20\] in \$1 increments.
+
+**a.** Plot Actual, Attributed, and the Residual on the same chart. Mark the Iran war move (ΔF = +17) with a vertical line.
+
+**b.** At what ΔF does the absolute residual first exceed 5% of the absolute Actual P&L? Report in a `gt::gt()` table. What does this tell you about using Greeks for risk management in extreme scenarios?
+
+```{r q4}
+
+lowerBound <- F_0 - 20
+upperBound <- F_0 + 20
+
+localDelta <- portTableFull %>%
+  dplyr::filter(underlyingFut == F_0) %>%
+  dplyr::pull(delta) %>%
+  sum(.)
+
+localGamma <- portTableFull %>%
+  dplyr::filter(underlyingFut == F_0) %>%
+  dplyr::pull(gamma) %>%
+  sum(.)
+
+# Comprehensive Table
+
+attribActualCompare <- portTableFull %>%
+  dplyr::filter(underlyingFut >= lowerBound & underlyingFut <= upperBound) %>%
+  dplyr::select(-c(delta, gamma, vega, theta)) %>%
+  dplyr::mutate(positionValue = n * mult * price) %>%
+  dplyr::group_by(underlyingFut) %>%
+  dplyr::summarise(
+    portValue = sum(positionValue)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate("Actual PnL" = portValue - portValueToday) %>%
+  dplyr::mutate(delta = localDelta,
+                gamma = localGamma) %>%
+  dplyr::mutate("Attributed PnL" = (delta * (underlyingFut - F_0)) + (0.5 * gamma * ((underlyingFut - F_0)^2))) %>%
+  dplyr::select(underlyingFut, !!"Actual PnL", !!"Attributed PnL") %>%
+  dplyr::mutate(underlyingFut = underlyingFut - F_0) %>%
+  dplyr::rename("Change in F" = underlyingFut) %>%
+  dplyr::mutate("Unexplained PnL" = round(`Actual PnL` - `Attributed PnL`, 2))
+  
+
+attribActualCompare %>%
+  plot_ly() %>%
+  add_trace(
+    x = ~ `Change in F`,
+    y = ~ `Actual PnL`,
+    type = "scatter",
+    mode = "lines",
+    name = "Actual PnL"
+  ) %>%
+  add_trace(
+    x = ~ `Change in F`,
+    y = ~ `Attributed PnL`,
+    type = "scatter",
+    mode = "lines",
+    name = "Attributed PnL"
+  ) %>%
+  add_trace(
+    x = ~ `Change in F`,
+    y = ~ `Unexplained PnL`,
+    type = "scatter",
+    mode = "lines",
+    name = "Unexplained PnL"
+  ) %>%
+  layout(shapes = list(type = "line", y0 = min(attribActualCompare$`Actual PnL`), y1 = max(attribActualCompare$`Actual PnL`), x0 = 17, x1 = 17, line = list(color = "darkred")),
+         title = list(text = "Actual vs. Attributed PnL Over Range F[-20,20]"),
+         xaxis = list(title = "Change in Underlying Future Price ($)"),
+         yaxis = list(title = "PnL ($)"))
+
+# Get % of actual unexplained
+
+percentTable <- attribActualCompare %>%
+  dplyr::select(`Change in F`, `Actual PnL`, `Unexplained PnL`) %>%
+  dplyr::mutate(`Actual PnL` = abs(`Actual PnL`),
+                `Unexplained PnL` = abs(`Unexplained PnL`)) %>%
+  dplyr::mutate("% of Actual Unexplained" = `Unexplained PnL` / `Actual PnL`) %>%
+  dplyr::filter(`% of Actual Unexplained` >= 0.05)
+  
+
+
+
+
+```
+
+# Question 5 (6 points)
+
+Discuss the key learnings and insights from a Greek risk management perspective. Your explanation must:
+
+-   Interpret the **full revaluation MTM profile** from Q1(d): describe the portfolio's curvature structure across the \$50–\$100 range. Identify the regions of maximum and minimum Gamma. Explain what the changing Gamma means for a desk running this portfolio — specifically, how frequently delta rebalancing is needed as WTI moves through the strikes.
+-   Interpret the **full revaluation P&L and Gamma profiles** from Q1(d): describe the portfolio's curvature structure and identify which positions drive positive vs negative Gamma regions.
+-   Identify which position and which Greek drove the largest loss in the Iran war scenario, and explain why that was predictable from the portfolio structure.
+-   Explain the role of **Vanna**: why is it non-trivial when both a large spot jump and a large vol spike occur simultaneously?
+-   Explain why the Greek approximation (Q4) breaks down at extreme moves, and what this means for a real desk managing this book.
+
+Pay particular attention to why textbook delta-hedging assumptions break down in geopolitical gap scenarios, and what risk tools a real energy desk would use instead.
+
+*Your answer here.*
