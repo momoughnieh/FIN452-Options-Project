@@ -20,13 +20,14 @@ editor: source
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE)
 options(scipen = 999)
 library(tidyverse)
 library(gt)
 library(RTL)
 library(gridExtra)
 library(patchwork)
+library(scales)
 
 F_0  <- 73.00
 r    <- 0.04
@@ -102,7 +103,7 @@ Create plots showing each Greek vs. futures price over F ∈ \[50, 100\], with o
 
 ```{r q1}
 
-stepSizeS <- 1
+stepSizeS <- 0.01
 stepSizeVol <- 0.01
 stepSizeTheta <- 1 / 365
 
@@ -120,13 +121,18 @@ priceOption <- function(S, X, T2M, r = 0.04, b = 0, sigma, type) {
   )$price
 }
 
+port <- port %>%
+  dplyr::mutate("Position" = c("LongP @ 70", "ShortP @ 55", "ShortC @ 80")) %>%
+  dplyr::select(-pos) %>%
+  dplyr::select(Position, everything())
+
 ## Construct comprehensive tibble
 
 portTableFull <- tibble(
   underlyingFut = rep(seq(50, 100, by = 1), nrow(port))
 ) %>%
   dplyr::group_by(underlyingFut) %>%
-  dplyr::mutate(pos = port$pos,
+  dplyr::mutate(Position = port$Position,
                 type = port$type,
                 K = port$K,
                 T2M = port$T2M,
@@ -153,21 +159,19 @@ portTableFull <- tibble(
 # Ideas: Scale y axis, alter x & y names, add title to the joined plots (can I do that?)
 
 greekTable <- portTableFull %>%
-  dplyr::select(c(underlyingFut, pos, delta, gamma, vega, theta))
+  dplyr::select(c(underlyingFut, Position, delta, gamma, vega, theta))
 
 deltaPlot <- greekTable %>%
-  ggplot(aes(x = underlyingFut, y = delta, col = pos)) + geom_line(linewidth = 1.5)
+  ggplot(aes(x = underlyingFut, y = delta, col = Position)) + geom_line(linewidth = 1.5) + labs(x = "Value of F", y = "Delta") + scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K"))
 
 gammaPlot <- greekTable %>%
-  ggplot(aes(x = underlyingFut, y = gamma, col = pos)) + geom_line(linewidth = 1.5)
+  ggplot(aes(x = underlyingFut, y = gamma, col = Position)) + geom_line(linewidth = 1.5) + labs(x = "Value of F", y = "Gamma") + scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K"))
 
 vegaPlot <- greekTable %>%
-  ggplot(aes(x = underlyingFut, y = vega, col = pos)) + geom_line(linewidth = 1.5)
+  ggplot(aes(x = underlyingFut, y = vega, col = Position)) + geom_line(linewidth = 1.5) + labs(x = "Value of F", y = "Vega") + scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K"))
 
 thetaPlot <- greekTable %>%
-  ggplot(aes(x = underlyingFut, y = theta, col = pos)) + geom_line(linewidth = 1.5)
-
-(deltaPlot | gammaPlot) / (vegaPlot | thetaPlot) + plot_annotation(title = "Greeks vs. Futures Price from [50,100]")
+  ggplot(aes(x = underlyingFut, y = theta, col = Position)) + geom_line(linewidth = 1.5) + labs(x = "Value of F", y = "Theta") + scale_y_continuous(labels = scales::label_number(scale = 0.001, suffix = "K"))
 
 ##
 
@@ -183,7 +187,7 @@ portValueToday <- portTableFull %>%
 # MTM Calculations
 
 portMTM <- portTableFull %>%
-  dplyr::select(underlyingFut, pos, n, price, gamma) %>% 
+  dplyr::select(underlyingFut, Position, n, price, gamma) %>% 
   dplyr::mutate(positionVal = n * mult * price) %>%
   dplyr::group_by(underlyingFut) %>%
   dplyr::summarise(
@@ -195,14 +199,41 @@ portMTM <- portTableFull %>%
 # Plot MTM and Gamma across F [50,100]
 
 portMTMPlot <- portMTM %>%
-  ggplot(aes(x = underlyingFut, y = portfolioVal)) + geom_line(linewidth = 1.5, color = "darkblue")
+  ggplot(aes(x = underlyingFut, y = portfolioVal)) + geom_line(linewidth = 1.5, color = "darkblue") + labs(x = "Value of F", y = "Portfolio MTM") + scale_y_continuous(label = scales::label_number(scale = 0.000001, suffix = "M"))
 
 portGammaPlot <- portMTM %>%
-  ggplot(aes(x = underlyingFut, y = portfolioGamma)) + geom_line(linewidth = 1.5, color = "darkgreen")
-
-(portMTMPlot | portGammaPlot)
+  ggplot(aes(x = underlyingFut, y = portfolioGamma)) + geom_line(linewidth = 1.5, color = "darkgreen") + labs(x = "Value of F", y = "Portfolio Gamma")
 
 ```
+
+### Step-Size Selection
+
+*Underlying step-size:* \$0.01
+
+*Vega step-size:* 0.01 (1 vol point)
+
+*Theta step-size*: (1 / 365) or 1 calendar day
+
+I decided that these step-sizes were appropriate as they provide ample accuracy while maintaining large enough differences in the numerator so that floating point errors don't dominate. After re-running my function on lower step-sizes, I found that the cost of floating point errors outweighed the benefit of estimation accuracy. I also verified that the greeks are stable across all values of F (by observing the table) for the chosen step-sizes since numerator differences will vary depending on moneyness for each position.
+
+### Greek vs. Futures Price over F ∈ \[50, 100\]
+
+```{r, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+
+(deltaPlot | gammaPlot) / (vegaPlot | thetaPlot) + plot_annotation(title = "Greeks vs. WTI Futures over Interval [50,100]", subtitle = "Vertical axis is PnL per 1 unit change in respective risk factor (thousands)")
+
+```
+
+### Portfolio MTM & Portfolio Gamma
+
+```{r, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+
+(portMTMPlot | portGammaPlot) + plot_annotation(title = "Portfolio MTM & Gamma over WTI Futures Interval [50,100]")
+```
+
+The shape of the portfolio's MTM curve across the interval reveals that it's downward sloping and slightly concave. Portfolio gamma is highest at around \$50, lowest at around \$65, and has a local maximum at around \~80 (in magnitude). In the first interval (50-65) the portfolio gamma decreases in magnitude as we approach the strike price of the long put, which is positive gamma. After its peak, it begins increasing again as futures price approaches the strike of the short call (negative gamma). The gamma of the portfolio then decreases after \~ \$80 as the underlying moves farther away from the strike.
+
+Since gamma is the rate of change of delta, a portfolio manager must rebalance more frequently as the value of WTI futures approaches the strikes of the short positions. The portfolio manager will balance less frequently at values closer to the strike of the long put or beyond the strike of the short call (\$80).
 
 # Question 2 (3 points)
 
@@ -223,14 +254,31 @@ portGreeksToday <- portTableFull %>%
   ) %>%
   dplyr::select(-underlyingFut)
 
-portGreeksToday %>% gt() %>%
-  tab_header(title = "Portfolio Greeks Today @ $73.00/bbl WTI Future") %>%
-  tab_style(style = cell_borders(sides = "all", color = "black"), locations = cells_body())
-
 
 ```
 
-# Question 3 (8 points)
+```{r, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+
+portGreeksToday %>% gt() %>%
+  tab_header(title = "Portfolio Greeks Today @ $73.00/bbl WTI Future") %>%
+  tab_style(style = cell_borders(sides = "all", color = "black"), locations = cells_body())
+```
+
+### Portfolio Delta Sign Change
+
+The sign of the portfolio delta never changes given the positions. This is because at no point across the interval of WTI prices are we ever in a net long delta position. We can prove this by looking at price intervals between and beyond strikes:
+
+**When I say increasing/decreasing, I am referring to magnitude only. Signs are implied by the contract positions.**
+
+-   F \< 55: Delta of short put approaches +1 while delta of the long put approaches -1. Delta of the short call approaches 0. \~ 0 delta for very small values, but expect delta to be slightly negative as it approaches 55 and the puts become deeper in the money.
+
+-   55 \< F \< 70: Delta of the short put begins decreasing as it moves away from strike, delta of the long put increases as it approaches its strike. Net negative delta.
+
+-   70 \< F \< 80: The delta of the long put begins decreasing (becomes less negative), but the delta of the short call becomes more negative as the price approaches 80. Net negative delta.
+
+-   F \> 80: As the price approaches infinity in this interval, the delta for both the long and put approach 0, while the delta for the short call approaches -1. Net negative delta.
+
+# Question 3 (8 points) 
 
 Overnight, US-Iran tensions escalate sharply. The US strikes Iranian nuclear facilities; Iran retaliates by mining the Strait of Hormuz. WTI gaps up at the open:
 
@@ -273,8 +321,8 @@ actualPnL <- port %>%
   dplyr::mutate(positionValueNew = n * mult * priceNew,
                 positionValueOld = n * mult * priceOld) %>%
   dplyr::mutate(actualPnL = positionValueNew - positionValueOld) %>%
-  dplyr::select(pos, actualPnL) %>%
-  tidyr::pivot_wider(names_from = "pos", values_from = "actualPnL") %>%
+  dplyr::select(Position, actualPnL) %>%
+  tidyr::pivot_wider(names_from = "Position", values_from = "actualPnL") %>%
   dplyr::mutate(" " = "Actual PnL") %>%
   dplyr::select(c(" ", everything())) %>%
   dplyr::mutate("Portfolio" = sum(across(where(~ is.numeric(.)))))
@@ -290,18 +338,18 @@ greeks <- portTableFull %>%
                 priceDownUp = mapply(priceOption, S = (underlyingFut - stepSizeS), X = K, T2M = T2M, sigma = (sigma + stepSizeVol), type = type),
                 priceDownDown = mapply(priceOption, S = (underlyingFut - stepSizeS), X = K, T2M = T2M, sigma = (sigma - stepSizeVol), type = type)) %>%
   dplyr::mutate(vanna = n * mult * ((priceUpUp - priceUpDown - priceDownUp + priceDownDown) / (4 * stepSizeS * stepSizeVol))) %>%
-  dplyr::select(pos, delta, gamma, vega, theta, vanna) %>%
+  dplyr::select(Position, delta, gamma, vega, theta, vanna) %>%
   dplyr::mutate(!!!setNames(map2(.[, -1], changesVec, ~ .x * .y), paste0(greekNames, " PnL"))) %>%
-  dplyr::select(pos, contains("PnL"))
+  dplyr::select(Position, contains("PnL"))
 
 # Attributed PnL
 
 attribPnL <- greeks %>%
-  dplyr::group_by(pos) %>%
+  dplyr::group_by(Position) %>%
   dplyr::mutate(positionVal = sum(across(where(~ is.numeric(.))))) %>%
   dplyr::ungroup() %>%
-  dplyr::select(pos, positionVal) %>%
-  tidyr::pivot_wider(names_from = "pos", values_from = "positionVal") %>%
+  dplyr::select(Position, positionVal) %>%
+  tidyr::pivot_wider(names_from = "Position", values_from = "positionVal") %>%
   dplyr::mutate(" " = "Attributed PnL") %>%
   dplyr::select(" ", everything()) %>%
   dplyr::mutate("Portfolio" = sum(across(where( ~is.numeric(.)))))
@@ -332,10 +380,10 @@ attribPnLs <- attribPnL %>%
   dplyr::pull(attribPnL)
 
 attribBreakdown <- greeks %>%
-  tidyr::pivot_longer(-pos,
+  tidyr::pivot_longer(-Position,
                       names_to = "measure",
                       values_to = "PnL") %>%
-  tidyr::pivot_wider(names_from = pos, values_from = PnL) %>%
+  tidyr::pivot_wider(names_from = Position, values_from = PnL) %>%
   dplyr::group_by(measure) %>%
   dplyr::mutate("Portfolio" = sum(across(where(~ is.numeric(.))))) %>%
   dplyr::ungroup() %>%
@@ -357,6 +405,14 @@ actAttribTable %>% gt() %>%
 
 
 ```
+
+### Analysis of Actual v. Attributed PnL – Iran War
+
+Our short call at a strike of \$80 dominates the loss in this position. This is because that position alone is deep in the money while the other positions are far out of the money. Since we're in a short position, we lose more money as that call goes deeper in the money.
+
+A greek attribution appears to be an unreliable approximation here, due to the sheer magnitude in risk factor shifts. For the overall portfolio, the loss was overstated by \$789,080, which is a consequential amount of estimation error. When looking at the individual positions in the table, their respective attributions are even more off – signalling that the lower unexplained amount for the portfolio may happen to be that way due to luck when summing across positions.
+
+The reason that the approximation breaks down is because of how far the shifts are relative to the values (except theta) at which the local slopes for each risk factor were calculated. Since we have finite number of terms in our Taylor series approximation, which theoretically can contain an infinite number of terms, the error margin grows as we deviate from our local points.
 
 # Question 4 (4 points)
 
@@ -402,35 +458,7 @@ attribActualCompare <- portTableFull %>%
   dplyr::mutate(underlyingFut = underlyingFut - F_0) %>%
   dplyr::rename("Change in F" = underlyingFut) %>%
   dplyr::mutate("Unexplained PnL" = round(`Actual PnL` - `Attributed PnL`, 2))
-  
 
-attribActualCompare %>%
-  plot_ly() %>%
-  add_trace(
-    x = ~ `Change in F`,
-    y = ~ `Actual PnL`,
-    type = "scatter",
-    mode = "lines",
-    name = "Actual PnL"
-  ) %>%
-  add_trace(
-    x = ~ `Change in F`,
-    y = ~ `Attributed PnL`,
-    type = "scatter",
-    mode = "lines",
-    name = "Attributed PnL"
-  ) %>%
-  add_trace(
-    x = ~ `Change in F`,
-    y = ~ `Unexplained PnL`,
-    type = "scatter",
-    mode = "lines",
-    name = "Unexplained PnL"
-  ) %>%
-  layout(shapes = list(type = "line", y0 = min(attribActualCompare$`Actual PnL`), y1 = max(attribActualCompare$`Actual PnL`), x0 = 17, x1 = 17, line = list(color = "darkred")),
-         title = list(text = "Actual vs. Attributed PnL Over Range F[-20,20]"),
-         xaxis = list(title = "Change in Underlying Future Price ($)"),
-         yaxis = list(title = "PnL ($)"))
 
 # Get % of actual unexplained
 
@@ -439,13 +467,73 @@ percentTable <- attribActualCompare %>%
   dplyr::mutate(`Actual PnL` = abs(`Actual PnL`),
                 `Unexplained PnL` = abs(`Unexplained PnL`)) %>%
   dplyr::mutate("% of Actual Unexplained" = `Unexplained PnL` / `Actual PnL`) %>%
-  dplyr::filter(`% of Actual Unexplained` >= 0.05)
-  
-
-
+  dplyr::filter(`% of Actual Unexplained` >= 0.05) %>%
+  dplyr::slice(8:9) %>%
+  dplyr::select(`Change in F`, `% of Actual Unexplained`)
 
 
 ```
+
+### Actual, Attributed, & Unexplained PnL across F ∈ \[–20, +20\]
+
+```{r, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+
+attribActualCompare %>%
+  plotly::plot_ly() %>%
+  plotly::add_trace(
+    x = ~ `Change in F`,
+    y = ~ `Actual PnL`,
+    type = "scatter",
+    mode = "lines",
+    name = "Actual PnL"
+  ) %>%
+  plotly::add_trace(
+    x = ~ `Change in F`,
+    y = ~ `Attributed PnL`,
+    type = "scatter",
+    mode = "lines",
+    name = "Attributed PnL"
+  ) %>%
+  plotly::add_trace(
+    x = ~ `Change in F`,
+    y = ~ `Unexplained PnL`,
+    type = "scatter",
+    mode = "lines",
+    name = "Unexplained PnL"
+  ) %>%
+  plotly::layout(shapes = list(
+    list(
+      type = "line", 
+      y0 = min(attribActualCompare$`Actual PnL`), 
+      y1 = max(attribActualCompare$`Actual PnL`), 
+      x0 = 17, 
+      x1 = 17,
+      line = list(color = "darkred"))),
+    title = list(text = "Actual, Attributed, & Unexplained PnL across F ∈ [–20, +20]"),
+    xaxis = list(title = "ΔF ($)"),
+    yaxis = list(title = "PnL ($)"))
+
+```
+
+\*\* The red vertical line above showcases the Iran war scenario \*\*
+
+```{r, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+
+percentTable %>%
+  gt() %>%
+  tab_header(title = "5% Breaking Point for Residual over Actual PnL") %>%
+  tab_style(
+    style = cell_borders(sides = "all", color = "black"),
+    locations = cells_body()
+  ) %>%
+  fmt_number(columns = 2, decimals = 2) %>%
+  fmt_percent(columns = 2, rows = c(1:2))
+
+```
+
+The table above showcases the "breaking point" ΔF after which the the absolute residual exceeds 5% of the absolute actual PnL. Beyond these points (in magnitude in their respective directions), that percentage only grows. This is consistent with the plot generated above, where we can see the attributed PnL series begin to deviate from the actual PnL series after a certain price change threshold.
+
+In the context of using greeks for risk management in extreme scenarios, the figures above illustrate an important limitation – the larger the change in risk factor, the less accurately greeks will explain value movements. For a deeper dive into this, see "Key Learnings."
 
 # Question 5 (6 points)
 
@@ -459,4 +547,14 @@ Discuss the key learnings and insights from a Greek risk management perspective.
 
 Pay particular attention to why textbook delta-hedging assumptions break down in geopolitical gap scenarios, and what risk tools a real energy desk would use instead.
 
-*Your answer here.*
+### Key Learnings:
+
+-   The full revaluation MTM profile showcased a downward sloping, slightly concave curve – signalling an overall negative delta position, meaning the portfolio loses value as the price of WTI increases. The magnitude of the portfolio gamma was highest near the strike of the short put (55) and lowest near the strike of the long put (70). Gamma magnitude decreased the price of WTI futures approached the strike of the long put. The closer the value of the underlying is to the strike of short positions, the more frequently a delta-hedger would need to rebalance.
+
+-   The portfolio was slightly concave – meaning that gamma was smaller at WTI prices closer to the strike of the long put (70) and higher for WTI prices closer to the strikes of the short put & call. After strike 80, the gamma begins decreasing again as it does not approach any more strike prices. This is consistent with the gamma profile created. The overall portfolio is consistently negative gamma, which is driven by the short positions in the put at 55 and call at 80. The long put offsets those two positions, which is why we see the gamma magnitude decreasing at WTI prices closer to the long put's strike.
+
+-   The position that drove the largest loss in the Iran war scenario was the short call at strike 80. This is easily explained by the portfolio structure – the short call is the only instrument at that point which is in the money. This causes the value of that position to skyrocket, and since we're short it means that we lose a lot of money.
+
+-   Vanna is the rate of change of delta with respect to the change in volatility. Delta and volatility interact because delta can be seen as a rough estimate of the probability that an option expires in the money, according to a risk-neutral framework. Since volatility is essentially how "wide" a distribution of prices are, it increases the probability that an option expires in the money – therefore increasing delta.
+
+-   A greek approximation breaks down at extreme moves because greeks are only reliable at approximating PnL when moves are small and close to the expansion point. Mathematically, we are unable to fully explain PnL for large shifts because of the lack of higher-order terms at our disposal. This doesn't dismiss the effectiveness of greek approximations – rather it showcases that it's only one aspect of risk management. A real desk managing this book can use greeks for smaller, more reasonable risk factor shifts and use other tools – such as full revaluation scenario analysis, analyzing tail risk, etc. – for investigating extreme moves.
